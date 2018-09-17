@@ -5,16 +5,15 @@ import (
 	"strings"
 
 	"bytes"
-	"io"
 
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	yamlutil "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/helm/pkg/chartutil"
 	"k8s.io/helm/pkg/proto/hapi/chart"
+	"k8s.io/helm/pkg/releaseutil"
 	"k8s.io/helm/pkg/tiller/environment"
 )
 
@@ -56,35 +55,29 @@ func (o *OwnerRefEngine) Render(chart *chart.Chart, values chartutil.Values) (ma
 // addOwnerRefs adds the configured ownerRefs to a single rendered file
 // Adds the ownerrefs to all the documents in a YAML file
 func (o *OwnerRefEngine) addOwnerRefs(fileContents string) (string, error) {
-
-	inputBuf := bytes.NewBuffer([]byte(fileContents))
-	decoder := yamlutil.NewYAMLOrJSONDecoder(inputBuf, 4096)
-
 	var outBuf bytes.Buffer
 	encoder := yaml.NewEncoder(&outBuf)
+	manifests := releaseutil.SplitManifests(fileContents)
 
-	for {
-		var parsed = map[string]interface{}{}
-		err := decoder.Decode(&parsed)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return "", fmt.Errorf("error parsing rendered template to add ownerrefs: %v", err)
+	for _, manifest := range manifests {
+		manifestMap := chartutil.FromYaml(manifest)
+
+		if errors, ok := manifestMap["Error"]; ok {
+			return "", fmt.Errorf("error parsing rendered template to add ownerrefs: %v", errors)
 		}
 
-		if len(parsed) == 0 {
-			return "", nil
-		}
-
-		unst, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&parsed)
+		unst, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&manifestMap)
 		if err != nil {
 			return "", err
 		}
+
 		unstructured := &unstructured.Unstructured{Object: unst}
 		unstructured.SetOwnerReferences(o.refs)
 
-		encoder.Encode(unstructured.Object)
+		err = encoder.Encode(unstructured.Object)
+		if err != nil {
+			return "", fmt.Errorf("error parsing the object to yaml: %v", err)
+		}
 	}
 
 	return outBuf.String(), nil
